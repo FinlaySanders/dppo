@@ -12,6 +12,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import tyro
 from torch.distributions.categorical import Categorical
+import wandb
 
 
 @dataclass
@@ -98,13 +99,14 @@ class DPPO:
         self.episodes = deque(maxlen=args.buffer_size)
         
         if args.track:
-            import wandb
             wandb.init(
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name=f"{args.env_id}_1",
+                name="dppo",
             )
+            wandb.define_metric("global_step")
+            wandb.define_metric("*", step_metric="global_step")
         
         self.global_step = 0
         self.iteration = 0
@@ -132,6 +134,9 @@ class DPPO:
             episode["rewards"].append(reward)
             episode["return"] += reward
             self.global_step += 1
+
+            if self.args.track:
+                wandb.log({"global_step": self.global_step}, step=self.global_step)
         
         episode["observations"] = np.array(episode["observations"], dtype=np.float32)
         episode["actions"] = np.array(episode["actions"], dtype=np.int64)
@@ -213,7 +218,6 @@ class DPPO:
             self.optimizer.step()
             
             if self.args.track:
-                import wandb
                 wandb.log({
                     "loss/dpo": total_loss.item(),
                     "debug/adaptive_beta": adaptive_beta,
@@ -233,7 +237,6 @@ class DPPO:
             self.episodes.append(episode)
             
             if self.args.track:
-                import wandb
                 wandb.log({
                     "charts/episodic_return": episode["return"],
                     "charts/episode_length": len(episode["actions"]),
@@ -242,11 +245,7 @@ class DPPO:
         # Wait until we have enough episodes
         if len(self.episodes) < self.args.min_episodes_before_training:
             return
-        
-        # Get current return statistics
-        current_returns = [e["return"] for e in self.episodes]
-        return_std = np.std(current_returns)
-        
+                
         # Rank episodes by return
         sorted_episodes = sorted(self.episodes, key=lambda e: e["return"])
         n = len(sorted_episodes)
@@ -275,7 +274,6 @@ class DPPO:
             self.train_step()
             
             if self.args.track and self.iteration % 10 == 0:
-                import wandb
                 sps = int(self.global_step / (time.time() - start_time))
                 wandb.log({"charts/SPS": sps}, step=self.global_step)
 
