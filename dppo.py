@@ -18,11 +18,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 @dataclass
 class Args:
-    exp_name: str = "pure_dpo_rl_normalized"
-    seed: int = 18
+    exp_name: str = "dppo"
+    seed: int = 1
     cuda: bool = True
     track: bool = False
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "dppo"
     wandb_entity: str = None
     capture_video: bool = False
     
