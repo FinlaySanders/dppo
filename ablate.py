@@ -8,5 +8,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for i in range(100):
-        subprocess.run(["python", "dppo.py", "--track", "--wandb-project-name", "bin", "--env_id", args.env_id, "--seed", str(i)])
-        subprocess.run(["python", "ppo.py", "--track", "--wandb-project-name", "bin", "--env_id", args.env_id, "--seed", str(i)])
+        subprocess.run(["python", "dppo.py", "--track", "--wandb-project-name", "acrobot", "--env_id", args.env_id, "--seed", str(i)])
+        #subprocess.run(["python", "ppo.py", "--track", "--wandb-project-name", "acrobot", "--env_id", args.env_id, "--seed", str(i)]) 

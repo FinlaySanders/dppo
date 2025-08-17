@@ -18,7 +18,7 @@ import wandb
 @dataclass
 class Args:
     exp_name: str = "dppo"
-    seed: int = 50
+    seed: int = 1
     cuda: bool = True
     track: bool = False
     wandb_project_name: str = "dppo"
@@ -31,8 +31,9 @@ class Args:
     num_envs: int = 8
     episodes_per_iteration: int = 32
     
-    # DPO hyperparameters
+    # DPPO hyperparameters
     beta: float = 0.1
+    entropy_coef: float = 0.1
     batch_size: int = 32
     buffer_size: int = 32
     min_episodes_before_training: int = 32
@@ -40,7 +41,7 @@ class Args:
     percentile: float = 0.2
     
     # Reference policy
-    reference_update_freq: int = 1
+    reference_update_freq: int = 50
     
     # Adaptive beta
     adaptive_beta: bool = True
@@ -74,7 +75,7 @@ class PolicyNetwork(nn.Module):
     def log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         logits = self.forward(obs)
         dist = Categorical(logits=logits)
-        return dist.log_prob(actions).sum()
+        return dist.log_prob(actions).mean()
 
 
 class DPPO:    
@@ -103,7 +104,7 @@ class DPPO:
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="dppo",
+                name="dppo_entropy_ref50_mean_scaled_ent0.1",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -112,7 +113,7 @@ class DPPO:
         self.iteration = 0
     
     def collect_episode(self) -> Dict:
-        obs, _ = self.env.reset()
+        obs, _ = self.env.reset(seed=self.args.seed)
         episode = {
             "observations": [],
             "actions": [],
@@ -166,7 +167,8 @@ class DPPO:
         
         # Compute adaptive beta based on score variance
         if self.args.adaptive_beta:
-            score_std = normalized_scores.std() + 1e-8
+            scores = np.array([e["return"] for e in all_episodes], dtype=np.float32)
+            score_std = scores.std() + 1e-8
             adaptive_beta = self.args.beta / score_std
             adaptive_beta = np.clip(adaptive_beta, 0.01, 1.0)
         else:
@@ -199,14 +201,25 @@ class DPPO:
                 ref_logp_good = self.reference_policy.log_prob(good_obs, good_actions)
                 ref_logp_bad = self.reference_policy.log_prob(bad_obs, bad_actions)
             
-            # DPO with reference policy and adaptive beta
-            logits = adaptive_beta * (
+            Lg = len(good_ep["actions"])
+            Lb = len(bad_ep["actions"])
+            beta_eff = adaptive_beta * (Lg + Lb) / 2.0
+
+            # DPO with reference policy and beta
+            logits = beta_eff * (
                 (logp_good - ref_logp_good) - 
                 (logp_bad - ref_logp_bad)
             )
             
             # Bradley-Terry loss with weighting
             loss = -F.logsigmoid(logits) * weight
+
+            entropy = 0.5 * (
+                Categorical(logits=self.policy(good_obs)).entropy().mean() +
+                Categorical(logits=self.policy(bad_obs)).entropy().mean()
+            )
+            loss = loss - self.args.entropy_coef * entropy
+
             losses.append(loss)
         
         # Optimize
