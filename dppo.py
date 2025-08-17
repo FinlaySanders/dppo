@@ -27,17 +27,17 @@ class Args:
     # Core hyperparameters
     env_id: str = "CartPole-v1"
     total_timesteps: int = 500_000
-    learning_rate: float = 3e-3
+    learning_rate: float = 3e-4
     num_envs: int = 8
     episodes_per_iteration: int = 32
     
     # DPPO hyperparameters
     beta: float = 0.1
-    entropy_coef: float = 0.1
+    entropy_coef: float = 0.01
     batch_size: int = 32
     buffer_size: int = 32
     min_episodes_before_training: int = 32
-    gradient_steps_per_iteration: int = 1
+    gradient_steps_per_iteration: int = 25
     percentile: float = 0.2
     
     # Reference policy
@@ -104,7 +104,7 @@ class DPPO:
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="dppo_entropy_ref50_mean_scaled_ent0.1",
+                name="dppo_entropy_ref50_mean_scaled_it25_2",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -153,7 +153,7 @@ class DPPO:
         normalized = advantages / std
         return normalized
     
-    def dpo_step(self, good_episodes: List[Dict], bad_episodes: List[Dict]):
+    def dppo_step(self, good_episodes: List[Dict], bad_episodes: List[Dict]):
         losses = []
         
         # Compute normalized scores (advantage normalization)
@@ -205,7 +205,7 @@ class DPPO:
             Lb = len(bad_ep["actions"])
             beta_eff = adaptive_beta * (Lg + Lb) / 2.0
 
-            # DPO with reference policy and beta
+            # DPPO with reference policy and beta
             logits = beta_eff * (
                 (logp_good - ref_logp_good) - 
                 (logp_bad - ref_logp_bad)
@@ -232,7 +232,7 @@ class DPPO:
             
             if self.args.track:
                 wandb.log({
-                    "loss/dpo": total_loss.item(),
+                    "loss/dppo": total_loss.item(),
                     "debug/adaptive_beta": adaptive_beta,
                 }, step=self.global_step)
             
@@ -273,8 +273,7 @@ class DPPO:
         # Perform gradient steps
         total_loss = 0
         for _ in range(self.args.gradient_steps_per_iteration):
-            loss = self.dpo_step(good_episodes, bad_episodes)
-            total_loss += loss
+            total_loss += self.dppo_step(good_episodes, bad_episodes)
                 
         # Update reference policy periodically
         if self.iteration % self.args.reference_update_freq == 0:
