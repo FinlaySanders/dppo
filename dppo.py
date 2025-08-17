@@ -42,9 +42,6 @@ class Args:
     
     # Reference policy
     reference_update_freq: int = 50
-    
-    # Adaptive beta
-    adaptive_beta: bool = True
 
 
 class PolicyNetwork(nn.Module):    
@@ -104,7 +101,7 @@ class DPPO:
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="dppo_entropy_ref50_mean_scaled_it25_2",
+                name="dppo_entropy_ref50_mean_scaled_it25_beta_scaled_3",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -165,14 +162,8 @@ class DPPO:
         good_scores = normalized_scores[:n_good]
         bad_scores = normalized_scores[n_good:]
         
-        # Compute adaptive beta based on score variance
-        if self.args.adaptive_beta:
-            scores = np.array([e["return"] for e in all_episodes], dtype=np.float32)
-            score_std = scores.std() + 1e-8
-            adaptive_beta = self.args.beta / score_std
-            adaptive_beta = np.clip(adaptive_beta, 0.01, 1.0)
-        else:
-            adaptive_beta = self.args.beta
+        # Collect signal magnitudes to compute adaptive beta - inside or outside loop?
+        signal_magnitudes = []
         
         # Sample pairs for this gradient step
         n_pairs = min(self.args.batch_size, len(good_episodes), len(bad_episodes))
@@ -200,11 +191,25 @@ class DPPO:
             with torch.no_grad():
                 ref_logp_good = self.reference_policy.log_prob(good_obs, good_actions)
                 ref_logp_bad = self.reference_policy.log_prob(bad_obs, bad_actions)
+                
+                # Measure signal strength for adaptive beta
+                signal_good = (logp_good - ref_logp_good).abs()
+                signal_bad = (logp_bad - ref_logp_bad).abs()
+                signal_magnitudes.append((signal_good + signal_bad) / 2)
+            
+            # Compute adaptive beta based on signal magnitude
+            avg_signal = torch.stack(signal_magnitudes).mean().item()
+            target_signal = 0.1  # Target signal magnitude - tune this
+
+            # Scale by training progress (0 -> 1)
+            progress = self.global_step / self.args.total_timesteps
+            signal_multiplier = target_signal / (avg_signal + 0.01)
+            adaptive_beta = np.clip(self.args.beta * signal_multiplier * progress, 0.01, 1.0)
             
             Lg = len(good_ep["actions"])
             Lb = len(bad_ep["actions"])
             beta_eff = adaptive_beta * (Lg + Lb) / 2.0
-
+            
             # DPPO with reference policy and beta
             logits = beta_eff * (
                 (logp_good - ref_logp_good) - 
@@ -213,13 +218,13 @@ class DPPO:
             
             # Bradley-Terry loss with weighting
             loss = -F.logsigmoid(logits) * weight
-
+            
             entropy = 0.5 * (
                 Categorical(logits=self.policy(good_obs)).entropy().mean() +
                 Categorical(logits=self.policy(bad_obs)).entropy().mean()
             )
             loss = loss - self.args.entropy_coef * entropy
-
+            
             losses.append(loss)
         
         # Optimize
@@ -237,6 +242,8 @@ class DPPO:
                 }, step=self.global_step)
             
             return total_loss.item()
+        else:
+            print("no losses!")
         return 0.0
     
     def train_step(self):
@@ -271,9 +278,8 @@ class DPPO:
         bad_episodes = sorted_episodes[:bad_threshold]
         
         # Perform gradient steps
-        total_loss = 0
         for _ in range(self.args.gradient_steps_per_iteration):
-            total_loss += self.dppo_step(good_episodes, bad_episodes)
+            self.dppo_step(good_episodes, bad_episodes)
                 
         # Update reference policy periodically
         if self.iteration % self.args.reference_update_freq == 0:
