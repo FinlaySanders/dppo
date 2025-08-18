@@ -28,14 +28,12 @@ class Args:
     env_id: str = "CartPole-v1"
     total_timesteps: int = 500_000
     learning_rate: float = 3e-4
-    num_envs: int = 8
     episodes_per_iteration: int = 32
     
     # DPPO hyperparameters
     beta: float = 0.1
     entropy_coef: float = 0.01
     batch_size: int = 32
-    buffer_size: int = 32
     min_episodes_before_training: int = 32
     gradient_steps_per_iteration: int = 25
     percentile: float = 0.2
@@ -92,16 +90,13 @@ class DPPO:
         # Reference policy for KL regularization
         self.reference_policy = PolicyNetwork(obs_dim, n_actions).to(self.device)
         self.reference_policy.load_state_dict(self.policy.state_dict())
-        
-        # Episode buffer
-        self.episodes = deque(maxlen=args.buffer_size)
-        
+                
         if args.track:
             wandb.init(
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="dppo_entropy_ref50_mean_scaled_it25_beta_scaled_3",
+                name="dppo_entropy_ref50_mean_scaled_it25_beta_scaled_seed_batch8",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -110,7 +105,7 @@ class DPPO:
         self.iteration = 0
     
     def collect_episode(self) -> Dict:
-        obs, _ = self.env.reset(seed=self.args.seed)
+        obs, _ = self.env.reset()
         episode = {
             "observations": [],
             "actions": [],
@@ -250,11 +245,10 @@ class DPPO:
         self.iteration += 1
         
         # Collect new episodes
-        new_episodes = []
+        episodes = []
         for _ in range(self.args.episodes_per_iteration):
             episode = self.collect_episode()
-            new_episodes.append(episode)
-            self.episodes.append(episode)
+            episodes.append(episode)
             
             if self.args.track:
                 wandb.log({
@@ -263,11 +257,11 @@ class DPPO:
                 }, step=self.global_step)
         
         # Wait until we have enough episodes
-        if len(self.episodes) < self.args.min_episodes_before_training:
+        if len(episodes) < self.args.min_episodes_before_training:
             return
                 
         # Rank episodes by return
-        sorted_episodes = sorted(self.episodes, key=lambda e: e["return"])
+        sorted_episodes = sorted(episodes, key=lambda e: e["return"])
         n = len(sorted_episodes)
                 
         # Select good and bad episodes based on percentiles
@@ -305,6 +299,7 @@ def main():
     
     # Create environment
     env = gym.make(args.env_id)
+    env.reset(seed=args.seed)
     
     # Create and train agent
     agent = DPPO(env, args)
