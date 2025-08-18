@@ -31,7 +31,7 @@ class Args:
     episodes_per_iteration: int = 32
     
     # DPPO hyperparameters
-    beta: float = 0.1
+    beta: float = 1.0
     entropy_coef: float = 0.01
     batch_size: int = 32
     min_episodes_before_training: int = 32
@@ -102,7 +102,7 @@ class DPPO:
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="dppo_yes",
+                name="_dppo",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -167,7 +167,6 @@ class DPPO:
         n_pairs = min(self.args.batch_size, len(good_episodes), len(bad_episodes))
         
         # First pass: collect all signal magnitudes to compute adaptive beta
-        signal_magnitudes = []
         sampled_pairs = []
         
         for _ in range(n_pairs):
@@ -192,22 +191,8 @@ class DPPO:
                 logp_bad = self.policy.log_prob(bad_obs, bad_actions)
                 ref_logp_good = self.reference_policy.log_prob(good_obs, good_actions)
                 ref_logp_bad = self.reference_policy.log_prob(bad_obs, bad_actions)
-                
-                signal_good = (logp_good - ref_logp_good).abs()
-                signal_bad = (logp_bad - ref_logp_bad).abs()
-                signal_magnitudes.append((signal_good + signal_bad) / 2)
         
-        # Compute adaptive beta once for all pairs
-        if signal_magnitudes:
-            avg_signal = torch.stack(signal_magnitudes).mean().item()
-            target_signal = 0.1  # Target signal magnitude - tune this
-            
-            # Scale by training progress (0.1 -> 1.0)
-            progress = min(1.0, 0.1 + 0.9 * self.global_step / self.args.total_timesteps)
-            signal_multiplier = target_signal / (avg_signal + 0.01)
-            adaptive_beta = np.clip(self.args.beta * signal_multiplier * progress, 0.01, 1.0)
-        else:
-            adaptive_beta = self.args.beta
+        adaptive_beta = (self.global_step / self.args.total_timesteps) * self.args.beta
         
         # Second pass: compute losses with consistent adaptive beta
         for good_idx, bad_idx, good_ep, bad_ep in sampled_pairs:
@@ -258,8 +243,6 @@ class DPPO:
                 wandb.log({
                     "loss/dppo": total_loss.item(),
                     "debug/adaptive_beta": adaptive_beta,
-                    "debug/avg_signal": avg_signal if signal_magnitudes else 0,
-                    "debug/progress": progress if signal_magnitudes else 0,
                 }, step=self.global_step)
             
             return total_loss.item()
