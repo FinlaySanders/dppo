@@ -14,7 +14,6 @@ import tyro
 from torch.distributions.categorical import Categorical
 import wandb
 
-
 @dataclass
 class Args:
     exp_name: str = "dppo"
@@ -26,7 +25,7 @@ class Args:
     
     # Core hyperparameters
     env_id: str = "CartPole-v1"
-    total_timesteps: int = 500_000
+    total_timesteps: int = 10_000_000
     learning_rate: float = 3e-4
     episodes_per_iteration: int = 32
     
@@ -35,7 +34,7 @@ class Args:
     entropy_coef: float = 0.01
     batch_size: int = 32
     min_episodes_before_training: int = 32
-    gradient_steps_per_iteration: int = 25
+    gradient_steps_per_iteration: int = 1
     percentile: float = 0.2
     
     # Reference policy
@@ -102,7 +101,7 @@ class DPPO:
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
                 config=vars(args),
-                name="_dppo",
+                name="_dppo__fixed5",
             )
             wandb.define_metric("global_step")
             wandb.define_metric("*", step_metric="global_step")
@@ -244,11 +243,9 @@ class DPPO:
                     "loss/dppo": total_loss.item(),
                     "debug/adaptive_beta": adaptive_beta,
                 }, step=self.global_step)
-            
-            return total_loss.item()
         else:
             print("Warning: No losses computed in dppo_step")
-            return 0.0
+        return
     
     def train_step(self):
         self.iteration += 1
@@ -276,10 +273,6 @@ class DPPO:
         # Select good and bad episodes based on percentiles
         good_threshold = int((1-self.args.percentile) * n)
         bad_threshold = int(self.args.percentile * n)
-        
-        # Ensure we have at least one episode in each category
-        good_threshold = max(n - 1, good_threshold)  # At least 1 good episode
-        bad_threshold = min(1, bad_threshold)  # At least 1 bad episode
         
         good_episodes = sorted_episodes[good_threshold:]
         bad_episodes = sorted_episodes[:bad_threshold]
