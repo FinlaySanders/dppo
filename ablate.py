@@ -9,4 +9,4 @@ if __name__ == "__main__":
 
     for i in range(100):
         #subprocess.run(["python", "ppo.py", "--track", "--wandb-project-name", "bin2", "--env_id", args.env_id, "--seed", str(i)])
-        subprocess.run(["python", "dppo3.py", "--track", "--wandb-project-name", "seg", "--env_id", args.env_id, "--seed", str(i)])
+        subprocess.run(["python", "dppo3.py", "--track", "--wandb-project-name", "cartpole", "--env_id", args.env_id, "--seed", str(i)])
