@@ -18,11 +18,11 @@ import wandb
 
 @dataclass
 class Args:
-    exp_name: str = "dppo"
+    exp_name: str = "prefer"
     seed: int = 1
     cuda: bool = True
     track: bool = False
-    wandb_project_name: str = "dppo"
+    wandb_project_name: str = "prefer"
     wandb_entity: str = None
     
     # Core hyperparameters
@@ -32,10 +32,9 @@ class Args:
     
     # PREFER hyperparameters
     beta: float = 0.1
-    entropy_coef: float = 0.01
-    episodes_per_batch: int = 128
-    pair_batch_size: int = 64
-    update_epochs: int = 50
+    episodes_per_batch: int = 32
+    pair_batch_size: int = 128
+    update_epochs: int = 10
     
     # Reference policy - maybe do EMA
     reference_update_freq: int = 50
@@ -142,25 +141,29 @@ def main():
 
         print(rewards.mean(), global_step)
 
-        # create preference pairs 
-        # all unique pairs in parallel tensors
-        idxs, jdxs = torch.triu_indices(args.episodes_per_batch, args.episodes_per_batch, offset=1, device=device)
+        # create preference pairs - skip ties
+        idxs, jdxs = torch.triu_indices(len(episodes), len(episodes), offset=1, device=device)
 
-        # filter by reward gap
+        # Filter out ties (equal rewards)
         gaps = rewards[idxs] - rewards[jdxs]
-        keep = gaps.abs() > 0.5 * rewards.std()
+        keep = gaps.abs() > 1e-6  # Only keep non-ties
+
         idxs, jdxs, gaps = idxs[keep], jdxs[keep], gaps[keep]
 
-        # order pairs: winner, loser
+        # Order pairs: winner, loser
         winners = torch.where(gaps > 0, idxs, jdxs)
-        losers  = torch.where(gaps > 0, jdxs, idxs)
+        losers = torch.where(gaps > 0, jdxs, idxs)
 
-        # find pairs for the update batch
-        total_pairs = winners.shape[0]
-        n = min(args.pair_batch_size, total_pairs)
-        sample_idxs = torch.randperm(total_pairs, device=device)[:n]
-        winners = winners[sample_idxs].tolist()
-        losers  = losers[sample_idxs].tolist()
+        # Sample batch
+        n = min(args.pair_batch_size, len(winners))
+        if n > 0:
+            sample_idxs = torch.randperm(len(winners), device=device)[:n]
+            winners = winners[sample_idxs].tolist()
+            losers = losers[sample_idxs].tolist()
+        else:
+            winners, losers = [], []
+
+        print(len(winners))
 
         for _ in range(args.update_epochs):
             # compute loss
@@ -184,14 +187,9 @@ def main():
                 )
 
                 loss = -F.logsigmoid(logits)
-                
-                # Add entropy bonus (average of both episodes)
-                entropy = 0.5 * (entropy_good + entropy_bad)
-                loss = loss - args.entropy_coef * entropy
-                
+                                
                 losses.append(loss)
             
-            print(len(losses))
             # no preference to learn from!
             if not losses:
                 continue
