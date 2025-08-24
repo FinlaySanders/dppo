@@ -14,6 +14,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import tyro
 from torch.distributions.categorical import Categorical
+from torch.distributions.normal import Normal
 import wandb
 
 @dataclass
@@ -27,54 +28,92 @@ class Args:
     
     # Core hyperparameters
     env_id: str = "CartPole-v1"
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 100_000_000
     learning_rate: float = 3e-4
     
     # PREFER hyperparameters
-    beta: float = 0.1
+    beta: float = 1.0
+    episode_buffer_size: int = 32
     episodes_per_batch: int = 32
     pair_batch_size: int = 128
     update_epochs: int = 10
     
-    # Reference policy - maybe do EMA
-    reference_update_freq: int = 50
+    # Reference policy
+    tau: float = 0.001
 
 
 class PolicyNetwork(nn.Module):    
-    def __init__(self, obs_dim: int, n_actions: int):
+    def __init__(self, obs_dim: int, act_dim: int, continuous: bool = False):
         super().__init__()
+        self.continuous = continuous
+        
         self.net = nn.Sequential(
             nn.Linear(obs_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 64),
             nn.Tanh(),
-            nn.Linear(64, n_actions)
         )
+        
+        if continuous:
+            self.mean_head = nn.Linear(64, act_dim)
+            self.log_std = nn.Parameter(torch.zeros(1, act_dim))
+        else:
+            self.logits_head = nn.Linear(64, act_dim)
         
         for layer in self.net:
             if isinstance(layer, nn.Linear):
                 nn.init.orthogonal_(layer.weight, np.sqrt(2))
                 nn.init.constant_(layer.bias, 0.0)
-        nn.init.orthogonal_(self.net[-1].weight, 0.01)
+        
+        if continuous:
+            nn.init.orthogonal_(self.mean_head.weight, 0.01)
+            nn.init.constant_(self.mean_head.bias, 0.0)
+        else:
+            nn.init.orthogonal_(self.logits_head.weight, 0.01)
+            nn.init.constant_(self.logits_head.bias, 0.0)
     
     def forward(self, x):
-        return self.net(x)
+        features = self.net(x)
+        if self.continuous:
+            mean = self.mean_head(features)
+            std = self.log_std.exp().expand_as(mean)
+            return mean, std
+        else:
+            return self.logits_head(features)
     
-    def get_action(self, obs: torch.Tensor) -> int:
-        logits = self.forward(obs)
-        dist = Categorical(logits=logits)
-        return dist.sample().item()
+    def get_action(self, obs: torch.Tensor):
+        if self.continuous:
+            # Ensure obs is batched
+            if obs.dim() == 1:
+                obs = obs.unsqueeze(0)
+            mean, std = self.forward(obs)
+            dist = Normal(mean, std)
+            action = dist.sample()
+            return action.squeeze(0).cpu().numpy()
+        else:
+            logits = self.forward(obs)
+            dist = Categorical(logits=logits)
+            return dist.sample().item()
     
     def log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        logits = self.forward(obs)
-        dist = Categorical(logits=logits)
-        return dist.log_prob(actions).mean()
+        if self.continuous:
+            mean, std = self.forward(obs)
+            dist = Normal(mean, std)
+            return dist.log_prob(actions).sum(dim=-1).mean()
+        else:
+            logits = self.forward(obs)
+            dist = Categorical(logits=logits)
+            return dist.log_prob(actions).mean()
     
     def log_prob_and_entropy(self, obs: torch.Tensor, actions: torch.Tensor):
-        """Returns log_prob and entropy, reusing logits computation"""
-        logits = self.forward(obs)
-        dist = Categorical(logits=logits)
-        return dist.log_prob(actions).mean(), dist.entropy().mean()
+        if self.continuous:
+            mean, std = self.forward(obs)
+            dist = Normal(mean, std)
+            return dist.log_prob(actions).sum(dim=-1).mean(), dist.entropy().sum(dim=-1).mean()
+        else:
+            logits = self.forward(obs)
+            dist = Categorical(logits=logits)
+            return dist.log_prob(actions).mean(), dist.entropy().mean()
 
 
 def main():
@@ -91,21 +130,29 @@ def main():
 
     # env dimensions
     obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.n
+    
+    # Check if action space is continuous or discrete
+    if isinstance(env.action_space, gym.spaces.Box):
+        continuous = True
+        act_dim = env.action_space.shape[0]
+    else:
+        continuous = False
+        act_dim = env.action_space.n
     
     # default device
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     
     # policy and reference policy
-    policy = PolicyNetwork(obs_dim, act_dim).to(device)
+    policy = PolicyNetwork(obs_dim, act_dim, continuous).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
 
-    reference_policy = PolicyNetwork(obs_dim, act_dim).to(device)
+    reference_policy = PolicyNetwork(obs_dim, act_dim, continuous).to(device)
     reference_policy.load_state_dict(policy.state_dict())
 
     # buffers 
-    # TODO: proper buffers for ragged obs and actions
-    rewards = torch.zeros((args.episodes_per_batch)).to(device)
+    # TODO: make proper buffers for obs/acts
+    episode_buffer = deque(maxlen=args.episode_buffer_size)
+    reward_buffer = deque(maxlen=args.episode_buffer_size)
 
     # logging
     global_step = 0
@@ -116,11 +163,10 @@ def main():
         iteration += 1
 
         # collect episodes
-        episodes = []
-
+        tot = 0
         for i in range(args.episodes_per_batch):
             ep = {"obs":[], "acts":[]}
-            rewards[i] = 0
+            rew = 0
             
             obs, _ = env.reset()
             done = False
@@ -133,18 +179,21 @@ def main():
 
                 obs, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
-                rewards[i] += reward
+                rew += reward
 
                 global_step += 1
 
-            episodes.append(ep)
+            episode_buffer.append(ep)
+            reward_buffer.append(rew)
+            tot += rew
 
-        print(rewards.mean(), global_step)
+        print(tot / args.episodes_per_batch, global_step)
 
         # create preference pairs - skip ties
-        idxs, jdxs = torch.triu_indices(len(episodes), len(episodes), offset=1, device=device)
+        idxs, jdxs = torch.triu_indices(len(episode_buffer), len(episode_buffer), offset=1, device=device)
 
         # Filter out ties (equal rewards)
+        rewards = torch.tensor(list(reward_buffer), device=device, dtype=torch.float32)
         gaps = rewards[idxs] - rewards[jdxs]
         keep = gaps.abs() > 1e-6  # Only keep non-ties
 
@@ -163,16 +212,14 @@ def main():
         else:
             winners, losers = [], []
 
-        print(len(winners))
-
         for _ in range(args.update_epochs):
             # compute loss
             losses = []
             for w, l in zip(winners, losers):
-                good_obs = torch.tensor(episodes[w]["obs"], device=device)
-                good_actions = torch.tensor(episodes[w]["acts"], device=device)
-                bad_obs = torch.tensor(episodes[l]["obs"], device=device)
-                bad_actions = torch.tensor(episodes[l]["acts"], device=device)
+                good_obs = torch.tensor(np.array(episode_buffer[w]["obs"]), device=device, dtype=torch.float32)
+                good_actions = torch.tensor(np.array(episode_buffer[w]["acts"]), device=device, dtype=torch.float32)
+                bad_obs = torch.tensor(np.array(episode_buffer[l]["obs"]), device=device, dtype=torch.float32)
+                bad_actions = torch.tensor(np.array(episode_buffer[l]["acts"]), device=device, dtype=torch.float32)
 
                 logp_good, entropy_good = policy.log_prob_and_entropy(good_obs, good_actions)
                 logp_bad, entropy_bad = policy.log_prob_and_entropy(bad_obs, bad_actions)
@@ -200,8 +247,8 @@ def main():
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
             optimizer.step()
 
-        if iteration % args.reference_update_freq == 0:
-            reference_policy.load_state_dict(policy.state_dict())
+        for param, ref_param in zip(policy.parameters(), reference_policy.parameters()):
+            ref_param.data.copy_(args.tau * param.data + (1 - args.tau) * ref_param.data)
 
     env.close()
 
