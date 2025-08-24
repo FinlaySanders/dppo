@@ -196,23 +196,23 @@ def main():
         gaps = rewards[idxs] - rewards[jdxs]
         keep = gaps.abs() > 1e-6
         idxs, jdxs, gaps = idxs[keep], jdxs[keep], gaps[keep]
-        winners = torch.where(gaps > 0, idxs, jdxs)
-        losers = torch.where(gaps > 0, jdxs, idxs)
-
-        # Sample batch
-        n = min(args.pair_batch_size, len(winners))
-        sample_idxs = torch.randperm(len(winners), device=device)[:n]
-        winners = winners[sample_idxs].tolist()
-        losers = losers[sample_idxs].tolist()
+        batch_winners = torch.where(gaps > 0, idxs, jdxs)
+        batch_losers = torch.where(gaps > 0, jdxs, idxs)
 
         for _ in range(args.update_epochs):
+            # sample batch
+            n = min(args.pair_batch_size, len(batch_winners))
+            sample_idxs = torch.randperm(len(batch_losers), device=device)[:n]
+            winners = batch_winners[sample_idxs].tolist()
+            losers = batch_losers[sample_idxs].tolist()
+
             # compute loss
             losses = []
             for w, l in zip(winners, losers):
                 good_obs = torch.tensor(np.array(episode_buffer[w]["obs"]), device=device, dtype=torch.float32)
-                good_actions = torch.tensor(np.array(episode_buffer[w]["acts"]), device=device, dtype=torch.float32)
+                good_actions = torch.tensor(np.array(episode_buffer[w]["acts"]), device=device, dtype=torch.float32 if continuous else torch.long)
                 bad_obs = torch.tensor(np.array(episode_buffer[l]["obs"]), device=device, dtype=torch.float32)
-                bad_actions = torch.tensor(np.array(episode_buffer[l]["acts"]), device=device, dtype=torch.float32)
+                bad_actions = torch.tensor(np.array(episode_buffer[l]["acts"]), device=device, dtype=torch.float32 if continuous else torch.long)
 
                 logp_good, entropy_good = policy.log_prob_and_entropy(good_obs, good_actions)
                 logp_bad, entropy_bad = policy.log_prob_and_entropy(bad_obs, bad_actions)
