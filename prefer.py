@@ -174,6 +174,7 @@ def main():
             while not done:
                 with torch.no_grad():
                     action = policy.get_action(torch.tensor(obs, device=device, dtype=torch.float32))
+                
                 ep["obs"].append(obs)
                 ep["acts"].append(action)
 
@@ -191,26 +192,18 @@ def main():
 
         # create preference pairs - skip ties
         idxs, jdxs = torch.triu_indices(len(episode_buffer), len(episode_buffer), offset=1, device=device)
-
-        # Filter out ties (equal rewards)
         rewards = torch.tensor(list(reward_buffer), device=device, dtype=torch.float32)
         gaps = rewards[idxs] - rewards[jdxs]
-        keep = gaps.abs() > 1e-6  # Only keep non-ties
-
+        keep = gaps.abs() > 1e-6
         idxs, jdxs, gaps = idxs[keep], jdxs[keep], gaps[keep]
-
-        # Order pairs: winner, loser
         winners = torch.where(gaps > 0, idxs, jdxs)
         losers = torch.where(gaps > 0, jdxs, idxs)
 
         # Sample batch
         n = min(args.pair_batch_size, len(winners))
-        if n > 0:
-            sample_idxs = torch.randperm(len(winners), device=device)[:n]
-            winners = winners[sample_idxs].tolist()
-            losers = losers[sample_idxs].tolist()
-        else:
-            winners, losers = [], []
+        sample_idxs = torch.randperm(len(winners), device=device)[:n]
+        winners = winners[sample_idxs].tolist()
+        losers = losers[sample_idxs].tolist()
 
         for _ in range(args.update_epochs):
             # compute loss
